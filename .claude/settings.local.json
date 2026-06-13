@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(npm --version)",
+      "Read(//Users/kiran/.npm/_logs/**)",
+      "Bash(node -e \"const db = require\\('better-sqlite3'\\)\\(':memory:'\\); console.log\\('better-sqlite3 OK'\\); db.close\\(\\);\")",
+      "Bash(node -e \"require\\('bcrypt'\\).hash\\('test', 4\\).then\\(\\(\\) => console.log\\('bcrypt OK'\\)\\)\")",
+      "Bash(node -e \"console.log\\('JWT_SECRET=' + require\\('crypto'\\).randomBytes\\(48\\).toString\\('hex'\\)\\)\")",
+      "Bash(node *)",
+      "Bash(curl -s -o /dev/null -w \"static: %{http_code}\\\\n\" http://localhost:3000/)",
+      "Bash(PORT=3456 node *)",
+      "Bash(curl -s -o /dev/null -w \"app.js: %{http_code}\\\\n\" http://localhost:3456/app.js)",
+      "Bash(curl -s -o /dev/null -w \"style.css: %{http_code}\\\\n\" http://localhost:3456/style.css)",
+      "Bash(curl -s http://localhost:3456/)",
+      "Bash(kill %1)",
+      "Bash(pkill -f \"node server/index.js\")",
+      "Bash(rm -f data.sqlite data.sqlite-wal data.sqlite-shm /tmp/login.json /tmp/u2.json)"
+    ]
+  }
+}

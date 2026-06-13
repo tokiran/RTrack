@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#3B82F6" />
+  <title>Routine Tracker</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div id="app">
+
+    <!-- Initial splash while we check the saved token -->
+    <div id="splash" class="splash">
+      <div class="spinner big"></div>
+    </div>
+
+    <!-- ============ LOGIN ============ -->
+    <section id="screen-login" class="screen auth-screen hidden">
+      <div class="auth-card">
+        <div class="logo">⭐</div>
+        <h1>Routine Tracker</h1>
+        <p class="tagline">Crush your day, one task at a time!</p>
+        <form id="login-form" novalidate>
+          <label for="login-username">Username</label>
+          <input id="login-username" type="text" autocomplete="username" autocapitalize="none" required />
+          <label for="login-password">Password</label>
+          <input id="login-password" type="password" autocomplete="current-password" required />
+          <p id="login-error" class="form-error hidden"></p>
+          <button type="submit" class="btn btn-primary btn-block">Log in</button>
+        </form>
+        <p class="auth-switch">New here? <a href="#" id="goto-register">Create an account</a></p>
+      </div>
+    </section>
+
+    <!-- ============ REGISTER ============ -->
+    <section id="screen-register" class="screen auth-screen hidden">
+      <div class="auth-card">
+        <div class="logo">🚀</div>
+        <h1>Join the club!</h1>
+        <p class="tagline">Pick a cool username to get started.</p>
+        <form id="register-form" novalidate>
+          <label for="register-username">Username</label>
+          <input id="register-username" type="text" autocomplete="username" autocapitalize="none"
+                 placeholder="3–20 letters or numbers" required />
+          <label for="register-password">Password</label>
+          <input id="register-password" type="password" autocomplete="new-password"
+                 placeholder="At least 8 characters" required />
+          <label for="register-confirm">Confirm password</label>
+          <input id="register-confirm" type="password" autocomplete="new-password" required />
+          <p id="register-error" class="form-error hidden"></p>
+          <button type="submit" class="btn btn-primary btn-block">Create account</button>
+        </form>
+        <p class="auth-switch">Already have an account? <a href="#" id="goto-login">Log in</a></p>
+      </div>
+    </section>
+
+    <!-- ============ DASHBOARD ============ -->
+    <section id="screen-dashboard" class="screen with-nav hidden">
+      <header class="dash-header">
+        <div>
+          <h2 id="greeting">Hi!</h2>
+          <p id="today-date" class="subtle"></p>
+        </div>
+        <div id="header-avatar" class="avatar small"></div>
+      </header>
+
+      <div class="summary-row">
+        <div class="summary-card points-card">
+          <span class="summary-value" id="points-today">0</span>
+          <span class="summary-label">points today</span>
+        </div>
+        <div class="summary-card streak-card">
+          <span class="summary-value"><span id="streak-count">0</span>🔥</span>
+          <span class="summary-label">day streak</span>
+        </div>
+      </div>
+
+      <div id="bonus-banner" class="bonus-banner hidden">
+        🎉 <strong>All done!</strong> You finished every task today and earned a
+        <strong>+25 point bonus!</strong> You're a superstar! 🌟
+      </div>
+
+      <div class="list-header">
+        <h3>Today's tasks</h3>
+        <button id="edit-tasks-btn" class="btn btn-ghost btn-small">✏️ Edit</button>
+      </div>
+
+      <div id="task-list" class="task-list">
+        <div class="skeleton-row"></div>
+        <div class="skeleton-row"></div>
+        <div class="skeleton-row"></div>
+        <div class="skeleton-row"></div>
+      </div>
+
+      <form id="add-task-form" class="add-task-form hidden">
+        <h3>Add a task</h3>
+        <label for="new-task-name">Task name</label>
+        <input id="new-task-name" type="text" maxlength="40" placeholder="e.g. Feed the dog" required />
+        <div class="form-row">
+          <div>
+            <label for="new-task-points">Points</label>
+            <select id="new-task-points">
+              <option value="5">5</option>
+              <option value="10" selected>10</option>
+              <option value="15">15</option>
+              <option value="20">20</option>
+              <option value="50">50</option>
+            </select>
+          </div>
+          <div>
+            <label for="new-task-category">Category</label>
+            <select id="new-task-category">
+              <option>Morning routine</option>
+              <option>Homework</option>
+              <option>Chores</option>
+              <option>Exercise</option>
+              <option>Reading</option>
+              <option>Evening routine</option>
+              <option selected>Custom</option>
+            </select>
+          </div>
+        </div>
+        <p id="add-task-error" class="form-error hidden"></p>
+        <button type="submit" class="btn btn-primary btn-block">Add task</button>
+      </form>
+    </section>
+
+    <!-- ============ STATS ============ -->
+    <section id="screen-stats" class="screen with-nav hidden">
+      <header class="screen-header"><h2>Your stats 📊</h2></header>
+
+      <div class="toggle-group" role="tablist">
+        <button id="stats-week-btn" class="toggle-btn active" role="tab">Week</button>
+        <button id="stats-month-btn" class="toggle-btn" role="tab">Month</button>
+      </div>
+
+      <div class="chart-card">
+        <div id="chart-loading" class="chart-loading hidden"><div class="spinner"></div></div>
+        <canvas id="stats-chart" height="220"></canvas>
+      </div>
+
+      <div class="stats-grid">
+        <div class="summary-card">
+          <span class="summary-value" id="stat-total">–</span>
+          <span class="summary-label">total points</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-value" id="stat-best-day">–</span>
+          <span class="summary-label">best day</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-value" id="stat-completion">–</span>
+          <span class="summary-label">completion (7d)</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-value" id="stat-best-streak">–</span>
+          <span class="summary-label">best streak</span>
+        </div>
+      </div>
+      <p id="stats-error" class="form-error hidden"></p>
+    </section>
+
+    <!-- ============ PROFILE ============ -->
+    <section id="screen-profile" class="screen with-nav hidden">
+      <header class="screen-header"><h2>Profile</h2></header>
+
+      <div class="profile-card">
+        <div id="profile-avatar" class="avatar big"></div>
+        <h3 id="profile-username"></h3>
+        <p id="profile-since" class="subtle"></p>
+        <div class="color-row" id="color-row" aria-label="Avatar color"></div>
+      </div>
+
+      <div class="profile-section">
+        <h3>Change password</h3>
+        <form id="password-form" novalidate>
+          <label for="current-password">Current password</label>
+          <input id="current-password" type="password" autocomplete="current-password" required />
+          <label for="new-password">New password</label>
+          <input id="new-password" type="password" autocomplete="new-password"
+                 placeholder="At least 8 characters" required />
+          <label for="confirm-new-password">Confirm new password</label>
+          <input id="confirm-new-password" type="password" autocomplete="new-password" required />
+          <p id="password-error" class="form-error hidden"></p>
+          <p id="password-success" class="form-success hidden">Password changed! ✅</p>
+          <button type="submit" class="btn btn-primary btn-block">Change password</button>
+        </form>
+      </div>
+
+      <div class="profile-section">
+        <button id="logout-btn" class="btn btn-secondary btn-block">Log out</button>
+      </div>
+
+      <div class="profile-section danger-zone">
+        <h3>Delete account</h3>
+        <p class="subtle">This removes your account, tasks and all your points forever.</p>
+        <form id="delete-form" novalidate>
+          <label for="delete-password">Type your password to confirm</label>
+          <input id="delete-password" type="password" autocomplete="current-password" required />
+          <p id="delete-error" class="form-error hidden"></p>
+          <button type="submit" class="btn btn-danger btn-block">Delete my account</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- ============ BOTTOM NAV ============ -->
+    <nav id="bottom-nav" class="bottom-nav hidden">
+      <button data-nav="dashboard" class="nav-btn active"><span class="nav-icon">🏠</span>Home</button>
+      <button data-nav="stats" class="nav-btn"><span class="nav-icon">📊</span>Stats</button>
+      <button data-nav="profile" class="nav-btn"><span class="nav-icon">😀</span>Profile</button>
+    </nav>
+
+    <!-- ============ CONFIRM MODAL ============ -->
+    <div id="modal-overlay" class="modal-overlay hidden">
+      <div class="modal" role="dialog" aria-modal="true">
+        <h3 id="modal-title"></h3>
+        <p id="modal-message"></p>
+        <div class="modal-actions">
+          <button id="modal-cancel" class="btn btn-ghost">Cancel</button>
+          <button id="modal-confirm" class="btn btn-danger">Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast for transient messages -->
+    <div id="toast" class="toast hidden"></div>
+  </div>
+</body>
+</html>
