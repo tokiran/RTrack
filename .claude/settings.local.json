@@ -15,7 +15,16 @@
       "Bash(curl -s http://localhost:3456/)",
       "Bash(kill %1)",
       "Bash(pkill -f \"node server/index.js\")",
-      "Bash(rm -f data.sqlite data.sqlite-wal data.sqlite-shm /tmp/login.json /tmp/u2.json)"
+      "Bash(rm -f data.sqlite data.sqlite-wal data.sqlite-shm /tmp/login.json /tmp/u2.json)",
+      "Bash(qlmanage -t -s 180 -o /tmp icon.svg)",
+      "Bash(qlmanage -t -s 512 -o /tmp icon.svg)",
+      "Read(//tmp/**)",
+      "Bash(rm -f /tmp/icon.svg.png)",
+      "Bash(cp /tmp/icon.svg.png icon-180.png)",
+      "Bash(cp /tmp/icon.svg.png icon-512.png)",
+      "Bash(sips -g pixelWidth -g pixelHeight icon-180.png icon-512.png)",
+      "Bash(npm uninstall *)",
+      "Bash(npm audit *)"
     ]
   }
 }

@@ -5,7 +5,7 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const rateLimit = require('express-rate-limit');
 
-const { db, seedDefaultTasks } = require('./db');
+const db = require('./db');
 const { signToken } = require('./auth');
 const { requireAuth } = require('./middleware');
 
@@ -68,44 +68,26 @@ function publicUser(row) {
   };
 }
 
-function getUser(id) {
-  return db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-}
-
 // Award the +25 full-day bonus when every task is logged for `date`,
 // and take it back if the day stops being complete (task unchecked or added).
 function updateBonus(userId, date) {
-  const taskCount = db
-    .prepare('SELECT COUNT(*) AS c FROM tasks WHERE user_id = ?')
-    .get(userId).c;
+  const taskCount = db.countTasks(userId);
   const doneCount = db
-    .prepare(
-      `SELECT COUNT(*) AS c FROM logs
-       WHERE user_id = ? AND logged_date = ? AND is_bonus = 0 AND task_id IS NOT NULL`
-    )
-    .get(userId, date).c;
-  const bonus = db
-    .prepare(
-      'SELECT id FROM logs WHERE user_id = ? AND logged_date = ? AND is_bonus = 1'
-    )
-    .get(userId, date);
+    .getLogsForDate(userId, date)
+    .filter((l) => l.is_bonus === 0 && l.task_id !== null).length;
+  const bonus = db.getBonusLog(userId, date);
 
   const complete = taskCount > 0 && doneCount >= taskCount;
   if (complete && !bonus) {
-    db.prepare(
-      `INSERT INTO logs (user_id, task_id, logged_date, points_earned, is_bonus)
-       VALUES (?, NULL, ?, ?, 1)`
-    ).run(userId, date, FULL_DAY_BONUS);
+    db.insertLog(userId, null, date, FULL_DAY_BONUS, 1);
   } else if (!complete && bonus) {
-    db.prepare('DELETE FROM logs WHERE id = ?').run(bonus.id);
+    db.deleteLogById(bonus.id);
   }
 }
 
 function todayPayload(userId) {
   const date = todayStr();
-  const rows = db
-    .prepare('SELECT task_id, points_earned, is_bonus FROM logs WHERE user_id = ? AND logged_date = ?')
-    .all(userId, date);
+  const rows = db.getLogsForDate(userId, date);
   return {
     date,
     completedTaskIds: rows.filter((r) => !r.is_bonus && r.task_id !== null).map((r) => r.task_id),
@@ -115,10 +97,7 @@ function todayPayload(userId) {
 }
 
 function calcStreaks(userId) {
-  const rows = db
-    .prepare('SELECT DISTINCT logged_date AS d FROM logs WHERE user_id = ? ORDER BY d')
-    .all(userId)
-    .map((r) => r.d);
+  const rows = db.getDistinctLogDates(userId);
   const dates = new Set(rows);
 
   // Current streak counts back from today; an unlogged today doesn't break
@@ -157,9 +136,7 @@ app.post('/api/register', authLimiter, async (req, res, next) => {
         .status(400)
         .json({ error: 'Password must be at least 8 characters long.' });
     }
-    const existing = db
-      .prepare('SELECT id FROM users WHERE username = ?')
-      .get(username);
+    const existing = db.getUserByUsername(username);
     if (existing) {
       return res
         .status(409)
@@ -167,14 +144,9 @@ app.post('/api/register', authLimiter, async (req, res, next) => {
     }
     const hash = await bcrypt.hash(password, SALT_ROUNDS);
     const color = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
-    const info = db
-      .prepare(
-        'INSERT INTO users (username, password_hash, avatar_color) VALUES (?, ?, ?)'
-      )
-      .run(username, hash, color);
-    seedDefaultTasks(info.lastInsertRowid);
+    const user = db.insertUser(username, hash, color);
+    db.seedDefaultTasks(user.id);
 
-    const user = getUser(info.lastInsertRowid);
     res.status(201).json({ token: signToken(user), user: publicUser(user) });
   } catch (err) {
     next(err);
@@ -187,9 +159,7 @@ app.post('/api/login', authLimiter, async (req, res, next) => {
     if (typeof username !== 'string' || typeof password !== 'string') {
       return res.status(400).json({ error: 'Username and password are required.' });
     }
-    const user = db
-      .prepare('SELECT * FROM users WHERE username = ?')
-      .get(username);
+    const user = db.getUserByUsername(username);
     const ok = user && (await bcrypt.compare(password, user.password_hash));
     if (!ok) {
       return res.status(401).json({ error: 'Wrong username or password.' });
@@ -203,7 +173,7 @@ app.post('/api/login', authLimiter, async (req, res, next) => {
 // ==================== account ====================
 
 app.get('/api/me', requireAuth, (req, res) => {
-  const user = getUser(req.userId);
+  const user = db.getUserById(req.userId);
   if (!user) return res.status(401).json({ error: 'Account no longer exists.' });
   res.json({ user: publicUser(user) });
 });
@@ -216,7 +186,7 @@ app.put('/api/me/password', requireAuth, async (req, res, next) => {
         .status(400)
         .json({ error: 'New password must be at least 8 characters long.' });
     }
-    const user = getUser(req.userId);
+    const user = db.getUserById(req.userId);
     const ok =
       typeof currentPassword === 'string' &&
       (await bcrypt.compare(currentPassword, user.password_hash));
@@ -224,10 +194,7 @@ app.put('/api/me/password', requireAuth, async (req, res, next) => {
       return res.status(401).json({ error: 'Current password is wrong.' });
     }
     const hash = await bcrypt.hash(newPassword, SALT_ROUNDS);
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(
-      hash,
-      req.userId
-    );
+    db.updateUserPassword(req.userId, hash);
     res.json({ ok: true });
   } catch (err) {
     next(err);
@@ -239,17 +206,14 @@ app.put('/api/me/avatar', requireAuth, (req, res) => {
   if (!AVATAR_COLORS.includes(color)) {
     return res.status(400).json({ error: 'Pick one of the available colors.' });
   }
-  db.prepare('UPDATE users SET avatar_color = ? WHERE id = ?').run(
-    color,
-    req.userId
-  );
-  res.json({ user: publicUser(getUser(req.userId)) });
+  db.updateUserAvatarColor(req.userId, color);
+  res.json({ user: publicUser(db.getUserById(req.userId)) });
 });
 
 app.delete('/api/me', requireAuth, async (req, res, next) => {
   try {
     const { password } = req.body || {};
-    const user = getUser(req.userId);
+    const user = db.getUserById(req.userId);
     const ok =
       typeof password === 'string' &&
       (await bcrypt.compare(password, user.password_hash));
@@ -258,7 +222,7 @@ app.delete('/api/me', requireAuth, async (req, res, next) => {
         .status(401)
         .json({ error: 'Password is wrong — account not deleted.' });
     }
-    db.prepare('DELETE FROM users WHERE id = ?').run(req.userId); // cascades to tasks + logs
+    db.deleteUser(req.userId); // also removes tasks + logs
     res.json({ ok: true });
   } catch (err) {
     next(err);
@@ -268,12 +232,7 @@ app.delete('/api/me', requireAuth, async (req, res, next) => {
 // ==================== tasks ====================
 
 app.get('/api/tasks', requireAuth, (req, res) => {
-  const tasks = db
-    .prepare(
-      'SELECT id, name, points, category, sort_order, is_default FROM tasks WHERE user_id = ? ORDER BY sort_order, id'
-    )
-    .all(req.userId);
-  res.json({ tasks });
+  res.json({ tasks: db.getTasks(req.userId) });
 });
 
 app.post('/api/tasks', requireAuth, (req, res) => {
@@ -292,27 +251,16 @@ app.post('/api/tasks', requireAuth, (req, res) => {
   if (!CATEGORIES.includes(category)) {
     return res.status(400).json({ error: 'Pick a valid category.' });
   }
-  const max = db
-    .prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM tasks WHERE user_id = ?')
-    .get(req.userId).m;
-  const info = db
-    .prepare(
-      'INSERT INTO tasks (user_id, name, points, category, sort_order) VALUES (?, ?, ?, ?, ?)'
-    )
-    .run(req.userId, trimmed, points, category, max + 1);
+  const max = db.getMaxSortOrder(req.userId);
+  const task = db.insertTask(req.userId, trimmed, points, category, max + 1);
   // A new unchecked task can invalidate today's full-day bonus.
   updateBonus(req.userId, todayStr());
-  const task = db
-    .prepare('SELECT id, name, points, category, sort_order, is_default FROM tasks WHERE id = ?')
-    .get(info.lastInsertRowid);
   res.status(201).json({ task, today: todayPayload(req.userId) });
 });
 
 app.delete('/api/tasks/:id', requireAuth, (req, res) => {
-  const info = db
-    .prepare('DELETE FROM tasks WHERE id = ? AND user_id = ?')
-    .run(req.params.id, req.userId);
-  if (info.changes === 0) {
+  const deleted = db.deleteTask(req.params.id, req.userId);
+  if (!deleted) {
     return res.status(404).json({ error: 'Task not found.' });
   }
   // Removing a task can make today complete.
@@ -325,22 +273,20 @@ app.put('/api/tasks/:id/move', requireAuth, (req, res) => {
   if (direction !== 'up' && direction !== 'down') {
     return res.status(400).json({ error: 'Direction must be "up" or "down".' });
   }
-  const tasks = db
-    .prepare('SELECT id, sort_order FROM tasks WHERE user_id = ? ORDER BY sort_order, id')
-    .all(req.userId);
+  const tasks = db.getTasks(req.userId);
   const idx = tasks.findIndex((t) => t.id === Number(req.params.id));
   if (idx === -1) return res.status(404).json({ error: 'Task not found.' });
   const swapWith = direction === 'up' ? idx - 1 : idx + 1;
   if (swapWith < 0 || swapWith >= tasks.length) {
     return res.json({ ok: true }); // already at the edge, nothing to do
   }
-  const setOrder = db.prepare('UPDATE tasks SET sort_order = ? WHERE id = ?');
-  db.transaction(() => {
-    // Normalize sort_order to the list index so swaps stay stable.
-    tasks.forEach((t, i) => setOrder.run(i, t.id));
-    setOrder.run(swapWith, tasks[idx].id);
-    setOrder.run(idx, tasks[swapWith].id);
-  })();
+  // Normalize sort_order to the list index, then swap the two affected tasks.
+  const updates = tasks.map((t, i) => ({ id: t.id, sort_order: i }));
+  [updates[idx].sort_order, updates[swapWith].sort_order] = [
+    updates[swapWith].sort_order,
+    updates[idx].sort_order,
+  ];
+  db.reorderTasks(updates);
   res.json({ ok: true });
 });
 
@@ -352,38 +298,25 @@ app.get('/api/log/today', requireAuth, (req, res) => {
 
 app.post('/api/log', requireAuth, (req, res) => {
   const { taskId } = req.body || {};
-  const task = db
-    .prepare('SELECT * FROM tasks WHERE id = ? AND user_id = ?')
-    .get(taskId, req.userId);
+  const task = db.getTaskForUser(taskId, req.userId);
   if (!task) return res.status(404).json({ error: 'Task not found.' });
 
   const date = todayStr();
-  const already = db
-    .prepare(
-      'SELECT id FROM logs WHERE user_id = ? AND task_id = ? AND logged_date = ?'
-    )
-    .get(req.userId, task.id, date);
+  const already = db.getLogForTaskDate(req.userId, task.id, date);
   if (already) {
     return res
       .status(409)
       .json({ error: 'You already checked that one off today!' });
   }
-  db.prepare(
-    `INSERT INTO logs (user_id, task_id, logged_date, points_earned, is_bonus)
-     VALUES (?, ?, ?, ?, 0)`
-  ).run(req.userId, task.id, date, task.points);
+  db.insertLog(req.userId, task.id, date, task.points, 0);
   updateBonus(req.userId, date);
   res.status(201).json(todayPayload(req.userId));
 });
 
 app.delete('/api/log/:taskId', requireAuth, (req, res) => {
   const date = todayStr();
-  const info = db
-    .prepare(
-      'DELETE FROM logs WHERE user_id = ? AND task_id = ? AND logged_date = ? AND is_bonus = 0'
-    )
-    .run(req.userId, req.params.taskId, date);
-  if (info.changes === 0) {
+  const deleted = db.deleteLogForTaskDate(req.userId, req.params.taskId, date);
+  if (!deleted) {
     return res.status(404).json({ error: 'That task is not logged for today.' });
   }
   updateBonus(req.userId, date);
@@ -392,25 +325,13 @@ app.delete('/api/log/:taskId', requireAuth, (req, res) => {
 
 // ==================== stats ====================
 
-function pointsByDate(userId, from, to) {
-  const rows = db
-    .prepare(
-      `SELECT logged_date AS d, SUM(points_earned) AS pts FROM logs
-       WHERE user_id = ? AND logged_date BETWEEN ? AND ? GROUP BY logged_date`
-    )
-    .all(userId, from, to);
-  const map = {};
-  for (const r of rows) map[r.d] = r.pts;
-  return map;
-}
-
 app.get('/api/stats/week', requireAuth, (req, res) => {
   const today = todayStr();
   const [y, m, d] = today.split('-').map(Number);
   const dow = new Date(y, m - 1, d).getDay(); // 0 = Sunday
   const monday = addDays(today, dow === 0 ? -6 : 1 - dow);
   const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  const map = pointsByDate(req.userId, monday, addDays(monday, 6));
+  const map = db.sumPointsByDateRange(req.userId, monday, addDays(monday, 6));
   const days = labels.map((label, i) => {
     const date = addDays(monday, i);
     return { date, label, points: map[date] || 0 };
@@ -423,7 +344,7 @@ app.get('/api/stats/month', requireAuth, (req, res) => {
   const [y, m] = today.split('-').map(Number);
   const monthStart = `${today.slice(0, 7)}-01`;
   const daysInMonth = new Date(y, m, 0).getDate();
-  const map = pointsByDate(
+  const map = db.sumPointsByDateRange(
     req.userId,
     monthStart,
     `${today.slice(0, 7)}-${String(daysInMonth).padStart(2, '0')}`
@@ -443,31 +364,15 @@ app.get('/api/stats/month', requireAuth, (req, res) => {
 });
 
 app.get('/api/stats/summary', requireAuth, (req, res) => {
-  const totalPoints =
-    db
-      .prepare('SELECT COALESCE(SUM(points_earned), 0) AS t FROM logs WHERE user_id = ?')
-      .get(req.userId).t;
+  const totalPoints = db.totalPoints(req.userId);
   const { current, best } = calcStreaks(req.userId);
-
-  const bestDay = db
-    .prepare(
-      `SELECT logged_date AS date, SUM(points_earned) AS points FROM logs
-       WHERE user_id = ? GROUP BY logged_date ORDER BY points DESC, date DESC LIMIT 1`
-    )
-    .get(req.userId);
+  const bestDay = db.getBestDay(req.userId);
 
   // Completion rate over the last 7 days: tasks checked / tasks possible.
-  const taskCount = db
-    .prepare('SELECT COUNT(*) AS c FROM tasks WHERE user_id = ?')
-    .get(req.userId).c;
+  const taskCount = db.countTasks(req.userId);
   const today = todayStr();
   const weekAgo = addDays(today, -6);
-  const done = db
-    .prepare(
-      `SELECT COUNT(*) AS c FROM logs
-       WHERE user_id = ? AND is_bonus = 0 AND logged_date BETWEEN ? AND ?`
-    )
-    .get(req.userId, weekAgo, today).c;
+  const done = db.countCompletedLogsInRange(req.userId, weekAgo, today);
   const possible = taskCount * 7;
   const completionRate = possible > 0 ? Math.round((done / possible) * 100) : 0;
 

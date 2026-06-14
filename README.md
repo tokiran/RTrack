@@ -2,12 +2,12 @@
 
 A mobile-first daily routine tracker for kids. Users get their own account, a
 daily checklist of tasks worth points, a streak counter, and weekly/monthly
-stats. All data lives in a server-side SQLite database — nothing is stored in
+stats. All data lives in a single server-side JSON file — nothing is stored in
 the browser except the login token.
 
 ## Tech stack
 
-- **Backend:** Node.js + Express, SQLite via `better-sqlite3`
+- **Backend:** Node.js + Express, data persisted to a JSON file (`data.json`)
 - **Auth:** JWT (7-day expiry) + bcrypt password hashing (12 salt rounds)
 - **Frontend:** plain HTML/CSS/JS single-page app, Chart.js from cdnjs
 
@@ -38,8 +38,8 @@ node server/index.js
 ```
 
 The app is served at <http://localhost:3000>. Change the port by setting
-`PORT` in `.env`. The SQLite database is created automatically as
-`data.sqlite` in the project root on first start.
+`PORT` in `.env`. The data file is created automatically as `data.json` in
+the project root on first start.
 
 ## Running on a public server
 
@@ -67,8 +67,7 @@ The app is served at <http://localhost:3000>. Change the port by setting
 
    Always serve the app over HTTPS in production — the JWT is sent on every
    request.
-4. Back up `data.sqlite` (plus its `-wal`/`-shm` files, or use
-   `sqlite3 data.sqlite ".backup backup.sqlite"`) to keep user data safe.
+4. Back up `data.json` (a simple copy is enough) to keep user data safe.
 
 ## API overview
 
