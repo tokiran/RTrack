@@ -1,260 +1,286 @@
-const fs = require('fs');
 const path = require('path');
+const { createClient } = require('@libsql/client');
 
-const DATA_FILE = path.join(__dirname, '..', 'data.json');
+// DATABASE_URL points at a remote Turso database (libsql://...) in
+// production. Falls back to a local libSQL file for development, which
+// behaves like a normal SQLite file on disk.
+const client = createClient({
+  url: process.env.DATABASE_URL || `file:${path.join(__dirname, '..', 'data.db')}`,
+  authToken: process.env.DATABASE_AUTH_TOKEN,
+});
 
-function load() {
-  if (fs.existsSync(DATA_FILE)) {
-    const loaded = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    return {
-      users: loaded.users || [],
-      tasks: loaded.tasks || [],
-      logs: loaded.logs || [],
-      nextId: loaded.nextId || { users: 1, tasks: 1, logs: 1 },
-    };
-  }
-  return { users: [], tasks: [], logs: [], nextId: { users: 1, tasks: 1, logs: 1 } };
+async function init() {
+  await client.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS users (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      password_hash TEXT NOT NULL,
+      avatar_color  TEXT NOT NULL DEFAULT '#3B82F6',
+      created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS tasks (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id    INTEGER NOT NULL,
+      name       TEXT NOT NULL,
+      points     INTEGER NOT NULL,
+      category   TEXT NOT NULL DEFAULT 'Custom',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_default INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS logs (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id       INTEGER NOT NULL,
+      task_id       INTEGER,
+      logged_date   TEXT NOT NULL,
+      points_earned INTEGER NOT NULL,
+      is_bonus      INTEGER NOT NULL DEFAULT 0,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(user_id, task_id, logged_date)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_logs_user_date ON logs(user_id, logged_date);
+    CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id);
+  `);
 }
 
-const data = load();
+// Foreign-key cascades (ON DELETE CASCADE / SET NULL) aren't relied on here —
+// PRAGMA foreign_keys behavior isn't guaranteed across local vs. remote Turso
+// connections, so cascades are done explicitly below instead.
 
-function save() {
-  const tmp = `${DATA_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, DATA_FILE);
-}
-
-function allocId(table) {
-  const id = data.nextId[table];
-  data.nextId[table] += 1;
-  return id;
-}
-
-// SQLite's datetime('now') format: "YYYY-MM-DD HH:MM:SS" (UTC).
-function nowStr() {
-  return new Date().toISOString().slice(0, 19).replace('T', ' ');
+// Converts "123" / 123 to a finite integer, or null if not a valid id.
+function toId(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 // ---------- users ----------
 
-function getUserById(id) {
-  return data.users.find((u) => u.id === Number(id));
+async function getUserById(id) {
+  const uid = toId(id);
+  if (uid === null) return undefined;
+  const r = await client.execute({ sql: 'SELECT * FROM users WHERE id = ?', args: [uid] });
+  return r.rows[0];
 }
 
-function getUserByUsername(username) {
-  const lower = username.toLowerCase();
-  return data.users.find((u) => u.username.toLowerCase() === lower);
+async function getUserByUsername(username) {
+  const r = await client.execute({ sql: 'SELECT * FROM users WHERE username = ?', args: [username] });
+  return r.rows[0];
 }
 
-function insertUser(username, passwordHash, avatarColor) {
-  const user = {
-    id: allocId('users'),
-    username,
-    password_hash: passwordHash,
-    avatar_color: avatarColor,
-    created_at: nowStr(),
-  };
-  data.users.push(user);
-  save();
-  return user;
+async function insertUser(username, passwordHash, avatarColor) {
+  const r = await client.execute({
+    sql: 'INSERT INTO users (username, password_hash, avatar_color) VALUES (?, ?, ?)',
+    args: [username, passwordHash, avatarColor],
+  });
+  return getUserById(Number(r.lastInsertRowid));
 }
 
-function updateUserPassword(id, hash) {
-  getUserById(id).password_hash = hash;
-  save();
+async function updateUserPassword(id, hash) {
+  await client.execute({ sql: 'UPDATE users SET password_hash = ? WHERE id = ?', args: [hash, Number(id)] });
 }
 
-function updateUserAvatarColor(id, color) {
-  getUserById(id).avatar_color = color;
-  save();
+async function updateUserAvatarColor(id, color) {
+  await client.execute({ sql: 'UPDATE users SET avatar_color = ? WHERE id = ?', args: [color, Number(id)] });
 }
 
-function deleteUser(id) {
+async function deleteUser(id) {
   const uid = Number(id);
-  data.users = data.users.filter((u) => u.id !== uid);
-  data.tasks = data.tasks.filter((t) => t.user_id !== uid);
-  data.logs = data.logs.filter((l) => l.user_id !== uid);
-  save();
+  await client.batch(
+    [
+      { sql: 'DELETE FROM logs WHERE user_id = ?', args: [uid] },
+      { sql: 'DELETE FROM tasks WHERE user_id = ?', args: [uid] },
+      { sql: 'DELETE FROM users WHERE id = ?', args: [uid] },
+    ],
+    'write'
+  );
 }
 
 // ---------- tasks ----------
 
-function taskView(t) {
+function taskView(row) {
   return {
-    id: t.id,
-    name: t.name,
-    points: t.points,
-    category: t.category,
-    sort_order: t.sort_order,
-    is_default: t.is_default,
+    id: row.id,
+    name: row.name,
+    points: row.points,
+    category: row.category,
+    sort_order: row.sort_order,
+    is_default: row.is_default,
   };
 }
 
-function getTasks(userId) {
-  return data.tasks
-    .filter((t) => t.user_id === Number(userId))
-    .sort((a, b) => a.sort_order - b.sort_order || a.id - b.id)
-    .map(taskView);
+async function getTasks(userId) {
+  const r = await client.execute({
+    sql: 'SELECT id, name, points, category, sort_order, is_default FROM tasks WHERE user_id = ? ORDER BY sort_order, id',
+    args: [Number(userId)],
+  });
+  return r.rows.map(taskView);
 }
 
-function getTaskById(id) {
-  return data.tasks.find((t) => t.id === Number(id));
+async function getTaskById(id) {
+  const tid = toId(id);
+  if (tid === null) return undefined;
+  const r = await client.execute({ sql: 'SELECT * FROM tasks WHERE id = ?', args: [tid] });
+  return r.rows[0];
 }
 
-function getTaskForUser(id, userId) {
-  return data.tasks.find((t) => t.id === Number(id) && t.user_id === Number(userId));
+async function getTaskForUser(id, userId) {
+  const tid = toId(id);
+  if (tid === null) return undefined;
+  const r = await client.execute({
+    sql: 'SELECT * FROM tasks WHERE id = ? AND user_id = ?',
+    args: [tid, Number(userId)],
+  });
+  return r.rows[0];
 }
 
-function getMaxSortOrder(userId) {
-  return data.tasks
-    .filter((t) => t.user_id === Number(userId))
-    .reduce((max, t) => Math.max(max, t.sort_order), -1);
+async function getMaxSortOrder(userId) {
+  const r = await client.execute({
+    sql: 'SELECT COALESCE(MAX(sort_order), -1) AS m FROM tasks WHERE user_id = ?',
+    args: [Number(userId)],
+  });
+  return r.rows[0].m;
 }
 
-function insertTaskRaw(userId, name, points, category, sortOrder, isDefault) {
-  const task = {
-    id: allocId('tasks'),
-    user_id: Number(userId),
-    name,
-    points,
-    category,
-    sort_order: sortOrder,
-    is_default: isDefault,
-  };
-  data.tasks.push(task);
-  return task;
-}
-
-function insertTask(userId, name, points, category, sortOrder) {
-  const task = insertTaskRaw(userId, name, points, category, sortOrder, 0);
-  save();
-  return taskView(task);
+async function insertTask(userId, name, points, category, sortOrder) {
+  const r = await client.execute({
+    sql: 'INSERT INTO tasks (user_id, name, points, category, sort_order) VALUES (?, ?, ?, ?, ?)',
+    args: [Number(userId), name, points, category, sortOrder],
+  });
+  return taskView(await getTaskById(Number(r.lastInsertRowid)));
 }
 
 // Deleting a task sets task_id to NULL on its logs (history keeps earned
-// points) instead of cascading the delete, mirroring the old FK behavior.
-function deleteTask(id, userId) {
-  const tid = Number(id);
-  const before = data.tasks.length;
-  data.tasks = data.tasks.filter((t) => !(t.id === tid && t.user_id === Number(userId)));
-  const deleted = data.tasks.length < before;
-  if (deleted) {
-    for (const log of data.logs) {
-      if (log.task_id === tid) log.task_id = null;
-    }
-    save();
-  }
-  return deleted;
+// points) instead of cascading the delete.
+async function deleteTask(id, userId) {
+  const tid = toId(id);
+  if (tid === null) return false;
+  const uid = Number(userId);
+  const existing = await client.execute({
+    sql: 'SELECT id FROM tasks WHERE id = ? AND user_id = ?',
+    args: [tid, uid],
+  });
+  if (existing.rows.length === 0) return false;
+  await client.batch(
+    [
+      { sql: 'UPDATE logs SET task_id = NULL WHERE task_id = ?', args: [tid] },
+      { sql: 'DELETE FROM tasks WHERE id = ? AND user_id = ?', args: [tid, uid] },
+    ],
+    'write'
+  );
+  return true;
 }
 
-// Applies a batch of {id, sort_order} updates in one save (used for reordering).
-function reorderTasks(updates) {
-  for (const { id, sort_order } of updates) {
-    const task = getTaskById(id);
-    if (task) task.sort_order = sort_order;
-  }
-  save();
+// Applies a batch of {id, sort_order} updates in one transaction (used for reordering).
+async function reorderTasks(updates) {
+  await client.batch(
+    updates.map(({ id, sort_order }) => ({
+      sql: 'UPDATE tasks SET sort_order = ? WHERE id = ?',
+      args: [sort_order, id],
+    })),
+    'write'
+  );
 }
 
 // ---------- logs ----------
 
-function getLogsForDate(userId, date) {
-  return data.logs.filter((l) => l.user_id === Number(userId) && l.logged_date === date);
+async function getLogsForDate(userId, date) {
+  const r = await client.execute({
+    sql: 'SELECT task_id, points_earned, is_bonus FROM logs WHERE user_id = ? AND logged_date = ?',
+    args: [Number(userId), date],
+  });
+  return r.rows;
 }
 
-function getLogForTaskDate(userId, taskId, date) {
-  return data.logs.find(
-    (l) => l.user_id === Number(userId) && l.task_id === Number(taskId) && l.logged_date === date
-  );
+async function getLogForTaskDate(userId, taskId, date) {
+  const tid = toId(taskId);
+  if (tid === null) return undefined;
+  const r = await client.execute({
+    sql: 'SELECT id FROM logs WHERE user_id = ? AND task_id = ? AND logged_date = ?',
+    args: [Number(userId), tid, date],
+  });
+  return r.rows[0];
 }
 
-function getBonusLog(userId, date) {
-  return data.logs.find(
-    (l) => l.user_id === Number(userId) && l.logged_date === date && l.is_bonus === 1
-  );
+async function getBonusLog(userId, date) {
+  const r = await client.execute({
+    sql: 'SELECT id FROM logs WHERE user_id = ? AND logged_date = ? AND is_bonus = 1',
+    args: [Number(userId), date],
+  });
+  return r.rows[0];
 }
 
-function insertLog(userId, taskId, date, points, isBonus) {
-  const log = {
-    id: allocId('logs'),
-    user_id: Number(userId),
-    task_id: taskId === null ? null : Number(taskId),
-    logged_date: date,
-    points_earned: points,
-    is_bonus: isBonus,
-    created_at: nowStr(),
-  };
-  data.logs.push(log);
-  save();
-  return log;
+async function insertLog(userId, taskId, date, points, isBonus) {
+  await client.execute({
+    sql: `INSERT INTO logs (user_id, task_id, logged_date, points_earned, is_bonus)
+          VALUES (?, ?, ?, ?, ?)`,
+    args: [Number(userId), taskId === null ? null : Number(taskId), date, points, isBonus],
+  });
 }
 
-function deleteLogById(id) {
-  data.logs = data.logs.filter((l) => l.id !== id);
-  save();
+async function deleteLogById(id) {
+  await client.execute({ sql: 'DELETE FROM logs WHERE id = ?', args: [Number(id)] });
 }
 
-function deleteLogForTaskDate(userId, taskId, date) {
-  const before = data.logs.length;
-  data.logs = data.logs.filter(
-    (l) =>
-      !(
-        l.user_id === Number(userId) &&
-        l.task_id === Number(taskId) &&
-        l.logged_date === date &&
-        l.is_bonus === 0
-      )
-  );
-  const deleted = data.logs.length < before;
-  save();
-  return deleted;
+async function deleteLogForTaskDate(userId, taskId, date) {
+  const tid = toId(taskId);
+  if (tid === null) return false;
+  const r = await client.execute({
+    sql: 'DELETE FROM logs WHERE user_id = ? AND task_id = ? AND logged_date = ? AND is_bonus = 0',
+    args: [Number(userId), tid, date],
+  });
+  return r.rowsAffected > 0;
 }
 
-function getDistinctLogDates(userId) {
-  const set = new Set(data.logs.filter((l) => l.user_id === Number(userId)).map((l) => l.logged_date));
-  return [...set].sort();
+async function getDistinctLogDates(userId) {
+  const r = await client.execute({
+    sql: 'SELECT DISTINCT logged_date AS d FROM logs WHERE user_id = ? ORDER BY d',
+    args: [Number(userId)],
+  });
+  return r.rows.map((row) => row.d);
 }
 
-function totalPoints(userId) {
-  return data.logs
-    .filter((l) => l.user_id === Number(userId))
-    .reduce((sum, l) => sum + l.points_earned, 0);
+async function totalPoints(userId) {
+  const r = await client.execute({
+    sql: 'SELECT COALESCE(SUM(points_earned), 0) AS t FROM logs WHERE user_id = ?',
+    args: [Number(userId)],
+  });
+  return r.rows[0].t;
 }
 
-function sumPointsByDateRange(userId, from, to) {
+async function sumPointsByDateRange(userId, from, to) {
+  const r = await client.execute({
+    sql: `SELECT logged_date AS d, SUM(points_earned) AS pts FROM logs
+          WHERE user_id = ? AND logged_date BETWEEN ? AND ? GROUP BY logged_date`,
+    args: [Number(userId), from, to],
+  });
   const map = {};
-  for (const l of data.logs) {
-    if (l.user_id === Number(userId) && l.logged_date >= from && l.logged_date <= to) {
-      map[l.logged_date] = (map[l.logged_date] || 0) + l.points_earned;
-    }
-  }
+  for (const row of r.rows) map[row.d] = row.pts;
   return map;
 }
 
-function countCompletedLogsInRange(userId, from, to) {
-  return data.logs.filter(
-    (l) =>
-      l.user_id === Number(userId) &&
-      l.is_bonus === 0 &&
-      l.logged_date >= from &&
-      l.logged_date <= to
-  ).length;
+async function countCompletedLogsInRange(userId, from, to) {
+  const r = await client.execute({
+    sql: `SELECT COUNT(*) AS c FROM logs
+          WHERE user_id = ? AND is_bonus = 0 AND logged_date BETWEEN ? AND ?`,
+    args: [Number(userId), from, to],
+  });
+  return r.rows[0].c;
 }
 
-function getBestDay(userId) {
-  const map = {};
-  for (const l of data.logs) {
-    if (l.user_id === Number(userId)) {
-      map[l.logged_date] = (map[l.logged_date] || 0) + l.points_earned;
-    }
-  }
-  const entries = Object.entries(map).map(([date, points]) => ({ date, points }));
-  entries.sort((a, b) => b.points - a.points || b.date.localeCompare(a.date));
-  return entries[0] || null;
+async function getBestDay(userId) {
+  const r = await client.execute({
+    sql: `SELECT logged_date AS date, SUM(points_earned) AS points FROM logs
+          WHERE user_id = ? GROUP BY logged_date ORDER BY points DESC, date DESC LIMIT 1`,
+    args: [Number(userId)],
+  });
+  return r.rows[0] || null;
 }
 
-function countTasks(userId) {
-  return data.tasks.filter((t) => t.user_id === Number(userId)).length;
+async function countTasks(userId) {
+  const r = await client.execute({ sql: 'SELECT COUNT(*) AS c FROM tasks WHERE user_id = ?', args: [Number(userId)] });
+  return r.rows[0].c;
 }
 
 // ---------- default tasks ----------
@@ -273,14 +299,19 @@ const DEFAULT_TASKS = [
   { name: 'In bed on time',        points: 10, category: 'Evening routine' },
 ];
 
-function seedDefaultTasks(userId) {
-  DEFAULT_TASKS.forEach((t, i) => {
-    insertTaskRaw(userId, t.name, t.points, t.category, i, 1);
-  });
-  save();
+async function seedDefaultTasks(userId) {
+  await client.batch(
+    DEFAULT_TASKS.map((t, i) => ({
+      sql: 'INSERT INTO tasks (user_id, name, points, category, sort_order, is_default) VALUES (?, ?, ?, ?, ?, 1)',
+      args: [Number(userId), t.name, t.points, t.category, i],
+    })),
+    'write'
+  );
 }
 
 module.exports = {
+  client,
+  init,
   getUserById,
   getUserByUsername,
   insertUser,

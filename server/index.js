@@ -38,6 +38,11 @@ const authLimiter = rateLimit({
   message: { error: 'Too many attempts. Please wait a minute and try again.' },
 });
 
+// Forwards rejected promises from async route handlers to Express's error middleware.
+function asyncHandler(fn) {
+  return (req, res, next) => fn(req, res, next).catch(next);
+}
+
 // ---------- date helpers (server-local time, YYYY-MM-DD) ----------
 
 function fmtDate(d) {
@@ -70,24 +75,23 @@ function publicUser(row) {
 
 // Award the +25 full-day bonus when every task is logged for `date`,
 // and take it back if the day stops being complete (task unchecked or added).
-function updateBonus(userId, date) {
-  const taskCount = db.countTasks(userId);
-  const doneCount = db
-    .getLogsForDate(userId, date)
-    .filter((l) => l.is_bonus === 0 && l.task_id !== null).length;
-  const bonus = db.getBonusLog(userId, date);
+async function updateBonus(userId, date) {
+  const taskCount = await db.countTasks(userId);
+  const logs = await db.getLogsForDate(userId, date);
+  const doneCount = logs.filter((l) => l.is_bonus === 0 && l.task_id !== null).length;
+  const bonus = await db.getBonusLog(userId, date);
 
   const complete = taskCount > 0 && doneCount >= taskCount;
   if (complete && !bonus) {
-    db.insertLog(userId, null, date, FULL_DAY_BONUS, 1);
+    await db.insertLog(userId, null, date, FULL_DAY_BONUS, 1);
   } else if (!complete && bonus) {
-    db.deleteLogById(bonus.id);
+    await db.deleteLogById(bonus.id);
   }
 }
 
-function todayPayload(userId) {
+async function todayPayload(userId) {
   const date = todayStr();
-  const rows = db.getLogsForDate(userId, date);
+  const rows = await db.getLogsForDate(userId, date);
   return {
     date,
     completedTaskIds: rows.filter((r) => !r.is_bonus && r.task_id !== null).map((r) => r.task_id),
@@ -96,8 +100,8 @@ function todayPayload(userId) {
   };
 }
 
-function calcStreaks(userId) {
-  const rows = db.getDistinctLogDates(userId);
+async function calcStreaks(userId) {
+  const rows = await db.getDistinctLogDates(userId);
   const dates = new Set(rows);
 
   // Current streak counts back from today; an unlogged today doesn't break
@@ -123,119 +127,103 @@ function calcStreaks(userId) {
 
 // ==================== auth ====================
 
-app.post('/api/register', authLimiter, async (req, res, next) => {
-  try {
-    const { username, password } = req.body || {};
-    if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
-      return res.status(400).json({
-        error: 'Username must be 3–20 letters or numbers (no spaces or symbols).',
-      });
-    }
-    if (typeof password !== 'string' || password.length < 8) {
-      return res
-        .status(400)
-        .json({ error: 'Password must be at least 8 characters long.' });
-    }
-    const existing = db.getUserByUsername(username);
-    if (existing) {
-      return res
-        .status(409)
-        .json({ error: 'That username is already taken. Try another one!' });
-    }
-    const hash = await bcrypt.hash(password, SALT_ROUNDS);
-    const color = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
-    const user = db.insertUser(username, hash, color);
-    db.seedDefaultTasks(user.id);
-
-    res.status(201).json({ token: signToken(user), user: publicUser(user) });
-  } catch (err) {
-    next(err);
+app.post('/api/register', authLimiter, asyncHandler(async (req, res) => {
+  const { username, password } = req.body || {};
+  if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
+    return res.status(400).json({
+      error: 'Username must be 3–20 letters or numbers (no spaces or symbols).',
+    });
   }
-});
-
-app.post('/api/login', authLimiter, async (req, res, next) => {
-  try {
-    const { username, password } = req.body || {};
-    if (typeof username !== 'string' || typeof password !== 'string') {
-      return res.status(400).json({ error: 'Username and password are required.' });
-    }
-    const user = db.getUserByUsername(username);
-    const ok = user && (await bcrypt.compare(password, user.password_hash));
-    if (!ok) {
-      return res.status(401).json({ error: 'Wrong username or password.' });
-    }
-    res.json({ token: signToken(user), user: publicUser(user) });
-  } catch (err) {
-    next(err);
+  if (typeof password !== 'string' || password.length < 8) {
+    return res
+      .status(400)
+      .json({ error: 'Password must be at least 8 characters long.' });
   }
-});
+  const existing = await db.getUserByUsername(username);
+  if (existing) {
+    return res
+      .status(409)
+      .json({ error: 'That username is already taken. Try another one!' });
+  }
+  const hash = await bcrypt.hash(password, SALT_ROUNDS);
+  const color = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
+  const user = await db.insertUser(username, hash, color);
+  await db.seedDefaultTasks(user.id);
+
+  res.status(201).json({ token: signToken(user), user: publicUser(user) });
+}));
+
+app.post('/api/login', authLimiter, asyncHandler(async (req, res) => {
+  const { username, password } = req.body || {};
+  if (typeof username !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ error: 'Username and password are required.' });
+  }
+  const user = await db.getUserByUsername(username);
+  const ok = user && (await bcrypt.compare(password, user.password_hash));
+  if (!ok) {
+    return res.status(401).json({ error: 'Wrong username or password.' });
+  }
+  res.json({ token: signToken(user), user: publicUser(user) });
+}));
 
 // ==================== account ====================
 
-app.get('/api/me', requireAuth, (req, res) => {
-  const user = db.getUserById(req.userId);
+app.get('/api/me', requireAuth, asyncHandler(async (req, res) => {
+  const user = await db.getUserById(req.userId);
   if (!user) return res.status(401).json({ error: 'Account no longer exists.' });
   res.json({ user: publicUser(user) });
-});
+}));
 
-app.put('/api/me/password', requireAuth, async (req, res, next) => {
-  try {
-    const { currentPassword, newPassword } = req.body || {};
-    if (typeof newPassword !== 'string' || newPassword.length < 8) {
-      return res
-        .status(400)
-        .json({ error: 'New password must be at least 8 characters long.' });
-    }
-    const user = db.getUserById(req.userId);
-    const ok =
-      typeof currentPassword === 'string' &&
-      (await bcrypt.compare(currentPassword, user.password_hash));
-    if (!ok) {
-      return res.status(401).json({ error: 'Current password is wrong.' });
-    }
-    const hash = await bcrypt.hash(newPassword, SALT_ROUNDS);
-    db.updateUserPassword(req.userId, hash);
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
+app.put('/api/me/password', requireAuth, asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (typeof newPassword !== 'string' || newPassword.length < 8) {
+    return res
+      .status(400)
+      .json({ error: 'New password must be at least 8 characters long.' });
   }
-});
+  const user = await db.getUserById(req.userId);
+  const ok =
+    typeof currentPassword === 'string' &&
+    (await bcrypt.compare(currentPassword, user.password_hash));
+  if (!ok) {
+    return res.status(401).json({ error: 'Current password is wrong.' });
+  }
+  const hash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+  await db.updateUserPassword(req.userId, hash);
+  res.json({ ok: true });
+}));
 
-app.put('/api/me/avatar', requireAuth, (req, res) => {
+app.put('/api/me/avatar', requireAuth, asyncHandler(async (req, res) => {
   const { color } = req.body || {};
   if (!AVATAR_COLORS.includes(color)) {
     return res.status(400).json({ error: 'Pick one of the available colors.' });
   }
-  db.updateUserAvatarColor(req.userId, color);
-  res.json({ user: publicUser(db.getUserById(req.userId)) });
-});
+  await db.updateUserAvatarColor(req.userId, color);
+  res.json({ user: publicUser(await db.getUserById(req.userId)) });
+}));
 
-app.delete('/api/me', requireAuth, async (req, res, next) => {
-  try {
-    const { password } = req.body || {};
-    const user = db.getUserById(req.userId);
-    const ok =
-      typeof password === 'string' &&
-      (await bcrypt.compare(password, user.password_hash));
-    if (!ok) {
-      return res
-        .status(401)
-        .json({ error: 'Password is wrong — account not deleted.' });
-    }
-    db.deleteUser(req.userId); // also removes tasks + logs
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
+app.delete('/api/me', requireAuth, asyncHandler(async (req, res) => {
+  const { password } = req.body || {};
+  const user = await db.getUserById(req.userId);
+  const ok =
+    typeof password === 'string' &&
+    (await bcrypt.compare(password, user.password_hash));
+  if (!ok) {
+    return res
+      .status(401)
+      .json({ error: 'Password is wrong — account not deleted.' });
   }
-});
+  await db.deleteUser(req.userId); // also removes tasks + logs
+  res.json({ ok: true });
+}));
 
 // ==================== tasks ====================
 
-app.get('/api/tasks', requireAuth, (req, res) => {
-  res.json({ tasks: db.getTasks(req.userId) });
-});
+app.get('/api/tasks', requireAuth, asyncHandler(async (req, res) => {
+  res.json({ tasks: await db.getTasks(req.userId) });
+}));
 
-app.post('/api/tasks', requireAuth, (req, res) => {
+app.post('/api/tasks', requireAuth, asyncHandler(async (req, res) => {
   const { name, points, category } = req.body || {};
   const trimmed = typeof name === 'string' ? name.trim() : '';
   if (!trimmed || trimmed.length > 40) {
@@ -251,29 +239,29 @@ app.post('/api/tasks', requireAuth, (req, res) => {
   if (!CATEGORIES.includes(category)) {
     return res.status(400).json({ error: 'Pick a valid category.' });
   }
-  const max = db.getMaxSortOrder(req.userId);
-  const task = db.insertTask(req.userId, trimmed, points, category, max + 1);
+  const max = await db.getMaxSortOrder(req.userId);
+  const task = await db.insertTask(req.userId, trimmed, points, category, max + 1);
   // A new unchecked task can invalidate today's full-day bonus.
-  updateBonus(req.userId, todayStr());
-  res.status(201).json({ task, today: todayPayload(req.userId) });
-});
+  await updateBonus(req.userId, todayStr());
+  res.status(201).json({ task, today: await todayPayload(req.userId) });
+}));
 
-app.delete('/api/tasks/:id', requireAuth, (req, res) => {
-  const deleted = db.deleteTask(req.params.id, req.userId);
+app.delete('/api/tasks/:id', requireAuth, asyncHandler(async (req, res) => {
+  const deleted = await db.deleteTask(req.params.id, req.userId);
   if (!deleted) {
     return res.status(404).json({ error: 'Task not found.' });
   }
   // Removing a task can make today complete.
-  updateBonus(req.userId, todayStr());
-  res.json({ ok: true, today: todayPayload(req.userId) });
-});
+  await updateBonus(req.userId, todayStr());
+  res.json({ ok: true, today: await todayPayload(req.userId) });
+}));
 
-app.put('/api/tasks/:id/move', requireAuth, (req, res) => {
+app.put('/api/tasks/:id/move', requireAuth, asyncHandler(async (req, res) => {
   const { direction } = req.body || {};
   if (direction !== 'up' && direction !== 'down') {
     return res.status(400).json({ error: 'Direction must be "up" or "down".' });
   }
-  const tasks = db.getTasks(req.userId);
+  const tasks = await db.getTasks(req.userId);
   const idx = tasks.findIndex((t) => t.id === Number(req.params.id));
   if (idx === -1) return res.status(404).json({ error: 'Task not found.' });
   const swapWith = direction === 'up' ? idx - 1 : idx + 1;
@@ -286,65 +274,65 @@ app.put('/api/tasks/:id/move', requireAuth, (req, res) => {
     updates[swapWith].sort_order,
     updates[idx].sort_order,
   ];
-  db.reorderTasks(updates);
+  await db.reorderTasks(updates);
   res.json({ ok: true });
-});
+}));
 
 // ==================== daily log ====================
 
-app.get('/api/log/today', requireAuth, (req, res) => {
-  res.json(todayPayload(req.userId));
-});
+app.get('/api/log/today', requireAuth, asyncHandler(async (req, res) => {
+  res.json(await todayPayload(req.userId));
+}));
 
-app.post('/api/log', requireAuth, (req, res) => {
+app.post('/api/log', requireAuth, asyncHandler(async (req, res) => {
   const { taskId } = req.body || {};
-  const task = db.getTaskForUser(taskId, req.userId);
+  const task = await db.getTaskForUser(taskId, req.userId);
   if (!task) return res.status(404).json({ error: 'Task not found.' });
 
   const date = todayStr();
-  const already = db.getLogForTaskDate(req.userId, task.id, date);
+  const already = await db.getLogForTaskDate(req.userId, task.id, date);
   if (already) {
     return res
       .status(409)
       .json({ error: 'You already checked that one off today!' });
   }
-  db.insertLog(req.userId, task.id, date, task.points, 0);
-  updateBonus(req.userId, date);
-  res.status(201).json(todayPayload(req.userId));
-});
+  await db.insertLog(req.userId, task.id, date, task.points, 0);
+  await updateBonus(req.userId, date);
+  res.status(201).json(await todayPayload(req.userId));
+}));
 
-app.delete('/api/log/:taskId', requireAuth, (req, res) => {
+app.delete('/api/log/:taskId', requireAuth, asyncHandler(async (req, res) => {
   const date = todayStr();
-  const deleted = db.deleteLogForTaskDate(req.userId, req.params.taskId, date);
+  const deleted = await db.deleteLogForTaskDate(req.userId, req.params.taskId, date);
   if (!deleted) {
     return res.status(404).json({ error: 'That task is not logged for today.' });
   }
-  updateBonus(req.userId, date);
-  res.json(todayPayload(req.userId));
-});
+  await updateBonus(req.userId, date);
+  res.json(await todayPayload(req.userId));
+}));
 
 // ==================== stats ====================
 
-app.get('/api/stats/week', requireAuth, (req, res) => {
+app.get('/api/stats/week', requireAuth, asyncHandler(async (req, res) => {
   const today = todayStr();
   const [y, m, d] = today.split('-').map(Number);
   const dow = new Date(y, m - 1, d).getDay(); // 0 = Sunday
   const monday = addDays(today, dow === 0 ? -6 : 1 - dow);
   const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  const map = db.sumPointsByDateRange(req.userId, monday, addDays(monday, 6));
+  const map = await db.sumPointsByDateRange(req.userId, monday, addDays(monday, 6));
   const days = labels.map((label, i) => {
     const date = addDays(monday, i);
     return { date, label, points: map[date] || 0 };
   });
   res.json({ days, total: days.reduce((s, x) => s + x.points, 0) });
-});
+}));
 
-app.get('/api/stats/month', requireAuth, (req, res) => {
+app.get('/api/stats/month', requireAuth, asyncHandler(async (req, res) => {
   const today = todayStr();
   const [y, m] = today.split('-').map(Number);
   const monthStart = `${today.slice(0, 7)}-01`;
   const daysInMonth = new Date(y, m, 0).getDate();
-  const map = db.sumPointsByDateRange(
+  const map = await db.sumPointsByDateRange(
     req.userId,
     monthStart,
     `${today.slice(0, 7)}-${String(daysInMonth).padStart(2, '0')}`
@@ -361,18 +349,18 @@ app.get('/api/stats/month', requireAuth, (req, res) => {
     return { label: `Week ${w + 1}`, points };
   });
   res.json({ weeks, total: weeks.reduce((s, x) => s + x.points, 0) });
-});
+}));
 
-app.get('/api/stats/summary', requireAuth, (req, res) => {
-  const totalPoints = db.totalPoints(req.userId);
-  const { current, best } = calcStreaks(req.userId);
-  const bestDay = db.getBestDay(req.userId);
+app.get('/api/stats/summary', requireAuth, asyncHandler(async (req, res) => {
+  const totalPoints = await db.totalPoints(req.userId);
+  const { current, best } = await calcStreaks(req.userId);
+  const bestDay = await db.getBestDay(req.userId);
 
   // Completion rate over the last 7 days: tasks checked / tasks possible.
-  const taskCount = db.countTasks(req.userId);
+  const taskCount = await db.countTasks(req.userId);
   const today = todayStr();
   const weekAgo = addDays(today, -6);
-  const done = db.countCompletedLogsInRange(req.userId, weekAgo, today);
+  const done = await db.countCompletedLogsInRange(req.userId, weekAgo, today);
   const possible = taskCount * 7;
   const completionRate = possible > 0 ? Math.round((done / possible) * 100) : 0;
 
@@ -383,7 +371,7 @@ app.get('/api/stats/summary', requireAuth, (req, res) => {
     completionRate,
     bestDay: bestDay && bestDay.points > 0 ? bestDay : null,
   });
-});
+}));
 
 // ==================== fallthrough + errors ====================
 
@@ -396,6 +384,13 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Something went wrong. Please try again.' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Routine Tracker running on http://localhost:${PORT}`);
-});
+db.init()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Routine Tracker running on http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to initialize database:', err);
+    process.exit(1);
+  });

@@ -2,12 +2,13 @@
 
 A mobile-first daily routine tracker for kids. Users get their own account, a
 daily checklist of tasks worth points, a streak counter, and weekly/monthly
-stats. All data lives in a single server-side JSON file — nothing is stored in
-the browser except the login token.
+stats. Nothing is stored in the browser except the login token.
 
 ## Tech stack
 
-- **Backend:** Node.js + Express, data persisted to a JSON file (`data.json`)
+- **Backend:** Node.js + Express, data persisted via `@libsql/client`
+  (SQLite-compatible) — a local file for development, or a remote
+  [Turso](https://turso.tech) database for persistent production storage
 - **Auth:** JWT (7-day expiry) + bcrypt password hashing (12 salt rounds)
 - **Frontend:** plain HTML/CSS/JS single-page app, Chart.js from cdnjs
 
@@ -38,13 +39,36 @@ node server/index.js
 ```
 
 The app is served at <http://localhost:3000>. Change the port by setting
-`PORT` in `.env`. The data file is created automatically as `data.json` in
-the project root on first start.
+`PORT` in `.env`.
+
+## Database
+
+By default (no `DATABASE_URL` set), the server stores everything in a local
+libSQL file `data.db`, created automatically in the project root on first
+start. This is fine for local development, but **on hosts with an ephemeral
+filesystem (e.g. Render's free tier), a local file is wiped on every restart
+or redeploy** — for persistent data, point the app at a free
+[Turso](https://turso.tech) database instead:
+
+1. Install the Turso CLI and sign in: `turso auth login`
+2. Create a database: `turso db create routine-tracker`
+3. Get the connection URL: `turso db show routine-tracker --url`
+4. Create an auth token: `turso db tokens create routine-tracker`
+5. Set `DATABASE_URL` and `DATABASE_AUTH_TOKEN` in `.env` (or your host's
+   environment variables) to the values from steps 3 and 4.
+
+If you have existing data in the old `data.json` file format, migrate it into
+whichever target is configured with:
+
+```bash
+node scripts/migrate-from-json.js
+```
 
 ## Running on a public server
 
 1. Copy the project to the server, run `npm install`, and create `.env` with a
-   strong `JWT_SECRET`.
+   strong `JWT_SECRET` (and `DATABASE_URL`/`DATABASE_AUTH_TOKEN` if using
+   Turso).
 2. Keep the process alive with a process manager, e.g.
    `pm2 start server/index.js --name routine-tracker` (or a systemd unit).
 3. Point a reverse proxy at port 3000 and terminate TLS there. Example nginx
@@ -67,7 +91,9 @@ the project root on first start.
 
    Always serve the app over HTTPS in production — the JWT is sent on every
    request.
-4. Back up `data.json` (a simple copy is enough) to keep user data safe.
+4. If running in local-file mode, back up `data.db` (a simple copy is enough)
+   to keep user data safe. With Turso, data is already stored off-server —
+   `turso db shell <name> .dump` can produce a backup if needed.
 
 ## API overview
 

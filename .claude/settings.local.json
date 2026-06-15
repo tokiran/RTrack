@@ -24,7 +24,19 @@
       "Bash(cp /tmp/icon.svg.png icon-512.png)",
       "Bash(sips -g pixelWidth -g pixelHeight icon-180.png icon-512.png)",
       "Bash(npm uninstall *)",
-      "Bash(npm audit *)"
+      "Bash(npm audit *)",
+      "Bash(npm view *)",
+      "Bash(PORT=3457 node server/index.js)",
+      "Bash(disown)",
+      "Bash(curl -s -o /dev/null -w \"homepage: %{http_code}\\\\n\" http://localhost:3457/)",
+      "Bash(curl -s http://localhost:3457/api/tasks -w \"\\\\ntasks \\(no auth\\): %{http_code}\\\\n\")",
+      "Bash(brew --version)",
+      "Bash(brew install *)",
+      "Bash(turso --version)",
+      "Bash(echo \"EXIT CODE: $?\")",
+      "Bash(curl -sSfL https://get.tur.so/install.sh)",
+      "Bash(bash)",
+      "Bash(git add *)"
     ]
   }
 }
