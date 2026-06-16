@@ -278,6 +278,36 @@ async function getBestDay(userId) {
   return r.rows[0] || null;
 }
 
+async function getTaskCompletionStats(userId, from, to) {
+  const r = await client.execute({
+    sql: `SELECT t.id AS task_id, t.name, t.category,
+                 COUNT(DISTINCT l.logged_date) AS completed_days
+          FROM tasks t
+          LEFT JOIN logs l ON l.task_id = t.id
+            AND l.user_id = t.user_id
+            AND l.is_bonus = 0
+            AND l.logged_date BETWEEN ? AND ?
+          WHERE t.user_id = ?
+          GROUP BY t.id, t.name, t.category
+          ORDER BY completed_days DESC, t.sort_order`,
+    args: [from, to, Number(userId)],
+  });
+  return r.rows;
+}
+
+async function getDayOfWeekPoints(userId, from, to) {
+  const r = await client.execute({
+    sql: `SELECT CAST(strftime('%w', logged_date) AS INTEGER) AS dow,
+                 SUM(points_earned) AS total_points,
+                 COUNT(DISTINCT logged_date) AS day_count
+          FROM logs
+          WHERE user_id = ? AND logged_date BETWEEN ? AND ?
+          GROUP BY dow`,
+    args: [Number(userId), from, to],
+  });
+  return r.rows;
+}
+
 async function countTasks(userId) {
   const r = await client.execute({ sql: 'SELECT COUNT(*) AS c FROM tasks WHERE user_id = ?', args: [Number(userId)] });
   return r.rows[0].c;
@@ -338,4 +368,6 @@ module.exports = {
   getBestDay,
   countTasks,
   seedDefaultTasks,
+  getTaskCompletionStats,
+  getDayOfWeekPoints,
 };

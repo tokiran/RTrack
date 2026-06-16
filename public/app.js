@@ -6,9 +6,12 @@ let token = localStorage.getItem('token');
 let currentUser = null;
 let tasks = [];
 let today = { date: null, completedTaskIds: [], pointsToday: 0, bonusAwarded: false };
+let viewDate = localDateStr();
 let editingTasks = false;
 let statsRange = 'week';
 let chart = null;
+let trendsChart = null;
+let dowChart = null;
 
 const AVATAR_COLORS = ['#3B82F6', '#22C55E', '#8B5CF6', '#F59E0B', '#06B6D4', '#EC4899'];
 const CATEGORY_ICONS = {
@@ -57,6 +60,25 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function localDateStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function clientAddDays(dateStr, n) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d + n);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+}
+
+function dateNavLabel(dateStr) {
+  const tod = localDateStr();
+  if (dateStr === tod) return 'Today';
+  if (dateStr === clientAddDays(tod, -1)) return 'Yesterday';
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
 function setLoading(btn, loading) {
@@ -119,7 +141,7 @@ function showScreen(name) {
   document.querySelectorAll('.nav-btn').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.nav === name);
   });
-  if (name === 'dashboard') loadDashboard();
+  if (name === 'dashboard') { viewDate = localDateStr(); loadDashboard(); }
   if (name === 'stats') loadStats();
   if (name === 'profile') renderProfile();
 }
@@ -208,13 +230,14 @@ $('goto-login').addEventListener('click', (e) => {
 
 async function loadDashboard() {
   renderHeader();
+  updateDateNav();
   try {
-    const [taskData, todayData] = await Promise.all([
+    const [taskData, dayData] = await Promise.all([
       api('/tasks'),
-      api('/log/today'),
+      api(`/log?date=${viewDate}`),
     ]);
     tasks = taskData.tasks;
-    today = todayData;
+    today = dayData;
     renderTaskList();
     renderTodaySummary();
     await refreshStreak();
@@ -225,12 +248,20 @@ async function loadDashboard() {
   }
 }
 
+function updateDateNav() {
+  $('date-nav-label').textContent = dateNavLabel(viewDate);
+  $('date-next').disabled = viewDate >= localDateStr();
+  $('tasks-heading').textContent =
+    viewDate === localDateStr() ? "Today's tasks" : `Tasks — ${dateNavLabel(viewDate)}`;
+}
+
 function renderHeader() {
   if (!currentUser) return;
   const hour = new Date().getHours();
   const part = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
   $('greeting').textContent = `${part}, ${currentUser.username}! 👋`;
-  $('today-date').textContent = new Date().toLocaleDateString(undefined, {
+  const [y, m, d] = viewDate.split('-').map(Number);
+  $('today-date').textContent = new Date(y, m - 1, d).toLocaleDateString(undefined, {
     weekday: 'long',
     month: 'long',
     day: 'numeric',
@@ -242,6 +273,7 @@ function renderHeader() {
 
 function renderTodaySummary() {
   $('points-today').textContent = today.pointsToday;
+  $('points-label').textContent = viewDate === localDateStr() ? 'points today' : 'points earned';
   $('bonus-banner').classList.toggle('hidden', !today.bonusAwarded);
 }
 
@@ -300,8 +332,8 @@ async function toggleTask(taskId, row) {
   row.classList.add('busy');
   try {
     today = wasDone
-      ? await api('/log/' + taskId, { method: 'DELETE' })
-      : await api('/log', { method: 'POST', body: { taskId } });
+      ? await api(`/log/${taskId}?date=${viewDate}`, { method: 'DELETE' })
+      : await api('/log', { method: 'POST', body: { taskId, date: viewDate } });
     row.classList.remove('busy');
     row.classList.toggle('done', !wasDone);
     if (!wasDone) {
@@ -337,7 +369,7 @@ function confirmDeleteTask(taskId) {
     onConfirm: async () => {
       try {
         const data = await api('/tasks/' + taskId, { method: 'DELETE' });
-        today = data.today;
+        today = viewDate === localDateStr() ? data.today : await api(`/log?date=${viewDate}`);
         tasks = tasks.filter((t) => t.id !== taskId);
         renderTaskList();
         renderTodaySummary();
@@ -353,6 +385,23 @@ $('edit-tasks-btn').addEventListener('click', () => {
   $('edit-tasks-btn').textContent = editingTasks ? '✅ Done' : '✏️ Edit';
   $('add-task-form').classList.toggle('hidden', !editingTasks);
   renderTaskList();
+});
+
+$('date-prev').addEventListener('click', () => {
+  viewDate = clientAddDays(viewDate, -1);
+  editingTasks = false;
+  $('edit-tasks-btn').textContent = '✏️ Edit';
+  $('add-task-form').classList.add('hidden');
+  loadDashboard();
+});
+
+$('date-next').addEventListener('click', () => {
+  if (viewDate >= localDateStr()) return;
+  viewDate = clientAddDays(viewDate, 1);
+  editingTasks = false;
+  $('edit-tasks-btn').textContent = '✏️ Edit';
+  $('add-task-form').classList.add('hidden');
+  loadDashboard();
 });
 
 $('add-task-form').addEventListener('submit', async (e) => {
@@ -373,7 +422,7 @@ $('add-task-form').addEventListener('submit', async (e) => {
     });
     tasks.push(data.task);
     tasks.sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
-    today = data.today;
+    today = viewDate === localDateStr() ? data.today : await api(`/log?date=${viewDate}`);
     $('new-task-name').value = '';
     renderTaskList();
     renderTodaySummary();
@@ -389,6 +438,7 @@ $('add-task-form').addEventListener('submit', async (e) => {
 
 async function loadStats() {
   clearError('stats-error');
+  if (statsRange === 'trends') return loadTrends();
   $('chart-loading').classList.remove('hidden');
   try {
     const [range, summary] = await Promise.all([
@@ -405,6 +455,99 @@ async function loadStats() {
   } finally {
     $('chart-loading').classList.add('hidden');
   }
+}
+
+async function loadTrends() {
+  $('trends-loading').classList.remove('hidden');
+  try {
+    const data = await api('/stats/trends');
+    renderTrendChart(data.dailyPoints);
+    renderDowChart(data.dayOfWeek);
+    renderTaskCompletion(data.taskStats);
+  } catch (err) {
+    if (err.message !== 'Session expired') showError('stats-error', err.message);
+  } finally {
+    $('trends-loading').classList.add('hidden');
+  }
+}
+
+function renderTrendChart(dailyPoints) {
+  const labels = dailyPoints.map((d) => d.label);
+  const values = dailyPoints.map((d) => d.points);
+  if (trendsChart) trendsChart.destroy();
+  trendsChart = new Chart($('trends-chart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        borderColor: '#8B5CF6',
+        backgroundColor: 'rgba(139,92,246,0.1)',
+        borderWidth: 2,
+        pointRadius: 3,
+        tension: 0.35,
+        fill: true,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, ticks: { precision: 0 } },
+        x: { grid: { display: false }, ticks: { maxTicksLimit: 8, maxRotation: 0 } },
+      },
+    },
+  });
+}
+
+function renderDowChart(dayOfWeek) {
+  // Display Mon–Sun order (strftime %w gives Sun=0)
+  const ordered = [1, 2, 3, 4, 5, 6, 0].map((dow) => dayOfWeek[dow]);
+  const labels = ordered.map((d) => d.label);
+  const values = ordered.map((d) => d.avgPoints);
+  const max = Math.max(...values);
+  const colors = values.map((v) => (v === max && v > 0 ? '#8B5CF6' : '#3B82F6'));
+  if (dowChart) dowChart.destroy();
+  dowChart = new Chart($('dow-chart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        backgroundColor: colors,
+        borderRadius: 6,
+        maxBarThickness: 36,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, ticks: { precision: 0 } },
+        x: { grid: { display: false } },
+      },
+    },
+  });
+}
+
+function renderTaskCompletion(taskStats) {
+  const container = $('task-completion-list');
+  if (taskStats.length === 0) {
+    container.innerHTML = '<p class="subtle" style="padding:12px 0">No tasks yet.</p>';
+    return;
+  }
+  container.innerHTML = taskStats.map((t) => `
+    <div class="completion-row">
+      <div class="completion-header">
+        <span class="completion-name">${escapeHtml(t.name)}</span>
+        <span class="completion-rate">${t.rate}%</span>
+      </div>
+      <div class="completion-bar-bg">
+        <div class="completion-bar-fill" style="width:${t.rate}%"></div>
+      </div>
+      <div class="completion-days">${t.completedDays} of 30 days</div>
+    </div>
+  `).join('');
 }
 
 function renderChart(range) {
@@ -446,11 +589,17 @@ function renderChart(range) {
 
 $('stats-week-btn').addEventListener('click', () => setStatsRange('week'));
 $('stats-month-btn').addEventListener('click', () => setStatsRange('month'));
+$('stats-trends-btn').addEventListener('click', () => setStatsRange('trends'));
 
 function setStatsRange(range) {
   statsRange = range;
   $('stats-week-btn').classList.toggle('active', range === 'week');
   $('stats-month-btn').classList.toggle('active', range === 'month');
+  $('stats-trends-btn').classList.toggle('active', range === 'trends');
+  const isTrends = range === 'trends';
+  $('chart-card-main').classList.toggle('hidden', isTrends);
+  $('stats-grid').classList.toggle('hidden', isTrends);
+  $('trends-section').classList.toggle('hidden', !isTrends);
   loadStats();
 }
 

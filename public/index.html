@@ -75,10 +75,16 @@
         <div id="header-avatar" class="avatar small"></div>
       </header>
 
+      <div class="date-nav">
+        <button id="date-prev" class="date-nav-btn" aria-label="Previous day">&#8249;</button>
+        <span id="date-nav-label" class="date-nav-label">Today</span>
+        <button id="date-next" class="date-nav-btn" aria-label="Next day" disabled>&#8250;</button>
+      </div>
+
       <div class="summary-row">
         <div class="summary-card points-card">
           <span class="summary-value" id="points-today">0</span>
-          <span class="summary-label">points today</span>
+          <span class="summary-label" id="points-label">points today</span>
         </div>
         <div class="summary-card streak-card">
           <span class="summary-value"><span id="streak-count">0</span>🔥</span>
@@ -92,7 +98,7 @@
       </div>
 
       <div class="list-header">
-        <h3>Today's tasks</h3>
+        <h3 id="tasks-heading">Today's tasks</h3>
         <button id="edit-tasks-btn" class="btn btn-ghost btn-small">✏️ Edit</button>
       </div>
 
@@ -140,17 +146,18 @@
     <section id="screen-stats" class="screen with-nav hidden">
       <header class="screen-header"><h2>Your stats 📊</h2></header>
 
-      <div class="toggle-group" role="tablist">
+      <div class="toggle-group toggle-group-3" role="tablist">
         <button id="stats-week-btn" class="toggle-btn active" role="tab">Week</button>
         <button id="stats-month-btn" class="toggle-btn" role="tab">Month</button>
+        <button id="stats-trends-btn" class="toggle-btn" role="tab">Trends</button>
       </div>
 
-      <div class="chart-card">
+      <div id="chart-card-main" class="chart-card">
         <div id="chart-loading" class="chart-loading hidden"><div class="spinner"></div></div>
         <canvas id="stats-chart" height="220"></canvas>
       </div>
 
-      <div class="stats-grid">
+      <div id="stats-grid" class="stats-grid">
         <div class="summary-card">
           <span class="summary-value" id="stat-total">–</span>
           <span class="summary-label">total points</span>
@@ -168,6 +175,25 @@
           <span class="summary-label">best streak</span>
         </div>
       </div>
+
+      <div id="trends-section" class="hidden">
+        <div id="trends-loading" class="hidden" style="text-align:center;padding:28px">
+          <div class="spinner" style="margin:0 auto"></div>
+        </div>
+        <div class="chart-card">
+          <div class="section-title">Points — last 30 days</div>
+          <canvas id="trends-chart" height="200"></canvas>
+        </div>
+        <div class="chart-card" style="margin-top:12px">
+          <div class="section-title">Best days of the week</div>
+          <canvas id="dow-chart" height="180"></canvas>
+        </div>
+        <div class="chart-card" style="margin-top:12px">
+          <div class="section-title">Task completion (30 days)</div>
+          <div id="task-completion-list"></div>
+        </div>
+      </div>
+
       <p id="stats-error" class="form-error hidden"></p>
     </section>
 

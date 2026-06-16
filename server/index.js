@@ -62,6 +62,15 @@ function addDays(dateStr, n) {
   return fmtDate(dt);
 }
 
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function parseDate(str) {
+  if (typeof str !== 'string' || !DATE_RE.test(str)) return null;
+  const [y, m, d] = str.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() + 1 !== m || dt.getDate() !== d) return null;
+  return str;
+}
+
 // ---------- shared queries ----------
 
 function publicUser(row) {
@@ -89,8 +98,7 @@ async function updateBonus(userId, date) {
   }
 }
 
-async function todayPayload(userId) {
-  const date = todayStr();
+async function datePayload(userId, date) {
   const rows = await db.getLogsForDate(userId, date);
   return {
     date,
@@ -98,6 +106,10 @@ async function todayPayload(userId) {
     pointsToday: rows.reduce((sum, r) => sum + r.points_earned, 0),
     bonusAwarded: rows.some((r) => r.is_bonus === 1),
   };
+}
+
+async function todayPayload(userId) {
+  return datePayload(userId, todayStr());
 }
 
 async function calcStreaks(userId) {
@@ -280,35 +292,43 @@ app.put('/api/tasks/:id/move', requireAuth, asyncHandler(async (req, res) => {
 
 // ==================== daily log ====================
 
-app.get('/api/log/today', requireAuth, asyncHandler(async (req, res) => {
-  res.json(await todayPayload(req.userId));
+app.get('/api/log', requireAuth, asyncHandler(async (req, res) => {
+  const date = req.query.date ? parseDate(req.query.date) : todayStr();
+  if (!date) return res.status(400).json({ error: 'Invalid date.' });
+  if (date > todayStr()) return res.status(400).json({ error: 'Cannot view logs for a future date.' });
+  res.json(await datePayload(req.userId, date));
 }));
 
 app.post('/api/log', requireAuth, asyncHandler(async (req, res) => {
-  const { taskId } = req.body || {};
+  const { taskId, date: rawDate } = req.body || {};
   const task = await db.getTaskForUser(taskId, req.userId);
   if (!task) return res.status(404).json({ error: 'Task not found.' });
 
-  const date = todayStr();
+  const date = rawDate ? parseDate(rawDate) : todayStr();
+  if (!date) return res.status(400).json({ error: 'Invalid date.' });
+  if (date > todayStr()) return res.status(400).json({ error: 'Cannot log tasks for a future date.' });
+
   const already = await db.getLogForTaskDate(req.userId, task.id, date);
   if (already) {
-    return res
-      .status(409)
-      .json({ error: 'You already checked that one off today!' });
+    return res.status(409).json({ error: 'You already checked that one off!' });
   }
   await db.insertLog(req.userId, task.id, date, task.points, 0);
   await updateBonus(req.userId, date);
-  res.status(201).json(await todayPayload(req.userId));
+  res.status(201).json(await datePayload(req.userId, date));
 }));
 
 app.delete('/api/log/:taskId', requireAuth, asyncHandler(async (req, res) => {
-  const date = todayStr();
+  const rawDate = req.query.date;
+  const date = rawDate ? parseDate(rawDate) : todayStr();
+  if (!date) return res.status(400).json({ error: 'Invalid date.' });
+  if (date > todayStr()) return res.status(400).json({ error: 'Cannot unlog tasks for a future date.' });
+
   const deleted = await db.deleteLogForTaskDate(req.userId, req.params.taskId, date);
   if (!deleted) {
-    return res.status(404).json({ error: 'That task is not logged for today.' });
+    return res.status(404).json({ error: 'That task is not logged for this date.' });
   }
   await updateBonus(req.userId, date);
-  res.json(await todayPayload(req.userId));
+  res.json(await datePayload(req.userId, date));
 }));
 
 // ==================== stats ====================
@@ -371,6 +391,44 @@ app.get('/api/stats/summary', requireAuth, asyncHandler(async (req, res) => {
     completionRate,
     bestDay: bestDay && bestDay.points > 0 ? bestDay : null,
   });
+}));
+
+app.get('/api/stats/trends', requireAuth, asyncHandler(async (req, res) => {
+  const today = todayStr();
+  const from = addDays(today, -29);
+
+  const map = await db.sumPointsByDateRange(req.userId, from, today);
+  const dailyPoints = [];
+  for (let i = 0; i < 30; i++) {
+    const date = addDays(from, i);
+    const [, m, d] = date.split('-');
+    dailyPoints.push({ date, label: `${parseInt(m)}/${parseInt(d)}`, points: map[date] || 0 });
+  }
+
+  const taskRows = await db.getTaskCompletionStats(req.userId, from, today);
+  const taskStats = taskRows.map((r) => ({
+    taskId: r.task_id,
+    name: r.name,
+    category: r.category,
+    completedDays: Number(r.completed_days),
+    rate: Math.round((Number(r.completed_days) / 30) * 100),
+  }));
+
+  const DOW_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const dowRows = await db.getDayOfWeekPoints(req.userId, from, today);
+  const dowMap = {};
+  for (const row of dowRows) dowMap[Number(row.dow)] = row;
+  const dayOfWeek = DOW_LABELS.map((label, dow) => {
+    const row = dowMap[dow];
+    return {
+      dow,
+      label,
+      avgPoints: row ? Math.round(Number(row.total_points) / Number(row.day_count)) : 0,
+      days: row ? Number(row.day_count) : 0,
+    };
+  });
+
+  res.json({ dailyPoints, taskStats, dayOfWeek });
 }));
 
 // ==================== fallthrough + errors ====================
