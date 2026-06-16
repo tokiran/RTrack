@@ -673,6 +673,10 @@ $('logout-btn').addEventListener('click', () => {
   showToast("You're logged out. See you soon! 👋");
 });
 
+document.querySelectorAll('.nav-btn').forEach((btn) => {
+  btn.addEventListener('click', () => showScreen(btn.dataset.nav));
+});
+
 // Tapping the dashboard avatar is a shortcut to the profile screen (logout lives there).
 $('header-avatar').addEventListener('click', () => showScreen('profile'));
 
